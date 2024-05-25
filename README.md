@@ -4,12 +4,12 @@
 TensorFlow implementation for the pre-print [Visual Interpretable and Explainable Deep Learning Models for Brain Tumor MRI and COVID-19 Chest X-ray Images](https://arxiv.org/abs/2208.00953).
 
 <figure>
-  <img src="./Figures/BrainTumor_Sample.png" alt="Description of image 1" style="width:45%; display:inline-block; margin-right:5px;">
-  <figcaption>Figure 1: Description of image 1</figcaption>
+  <img src="./Figures/BrainTumor_Sample.png" alt="Description of image 1" style="width:100%; display:inline-block; margin-right:5px;">
+  <figcaption>Brain Tumor image samples</figcaption>
 </figure>
 <figure>
-  <img src="./Figures/Covid_Sample.png" alt="Description of image 2" style="width:45%; display:inline-block;">
-  <figcaption>Figure 2: Description of image 2</figcaption>
+  <img src="./Figures/Covid_Sample.png" alt="Description of image 2" style="width:100%; display:inline-block;">
+  <figcaption>Chest X-ray image samples</figcaption>
 </figure>
 
 ## Description
@@ -120,9 +120,15 @@ The program can be executed with various commands for different purposes:
 ## Sample results
 
 ### Visual Explanability
-![Brain Tumor explanability](https://dogacademy.org/blog/wp-content/uploads/2023/08/bichon-frise-against-grey-background.jpg)
-### Empirical Evaluation of Saliency Methods
+![Brain Tumor explanability](./Figures/BrainTumor_Saliency_Maps_inception_resnet_v2.png)
 
+![Brain Tumor explanability](./Figures/Covid_Saliency_Maps_xception.png)
+### Empirical Evaluation of Saliency Methods
+![Brain Tumor AIC Curves](./Figures/BrainTumor_AIC_Aggregated.png)
+![Brain Tumor SIC Curves](./Figures/BrainTumor_SIC_Aggregated.png)
+
+![Chest X-ray AIC explanability](./Figures/Covid_AIC_Aggregated.png)
+![Chest X-ray SIC explanability](./Figures/Covid_IC_Aggregated.png)
 ## Authors
 
 Contributors and contact information:
