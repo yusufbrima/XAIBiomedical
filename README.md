@@ -139,14 +139,6 @@ Contributors and contact information:
 * 0.1
     * Initial Release
 
-## Citation
-@article{Brima2022VisualInterpretableExplainable,
-  title={Visual Interpretable and Explainable Deep Learning Models for Brain Tumor MRI and COVID-19 Chest X-ray Images},
-  author={Yusuf Brima},
-  journal={arXiv preprint arXiv:2208.00953},
-  year={2022}
-}
-
 
 ## License
 
