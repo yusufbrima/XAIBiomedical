@@ -199,8 +199,14 @@ def compute_pic_metric(
     pixel_mask = saliency_map >= quantile
     pixel_mask = np.logical_or(pixel_mask, random_mask)
     blurred_image = create_blurred_image(full_img=img, pixel_mask=pixel_mask)
+    if experiment == "base":
+      entropy = estimate_image_entropy(blurred_image)
+    elif experiment == "kapis":
+      entropy = estimate_entropy(blurred_image)
+    else:
+      entropy = estimate_image_avg_entropy(blurred_image)
     # entropy = estimate_image_entropy(blurred_image)
-    entropy = estimate_entropy(blurred_image)
+    # entropy = estimate_entropy(blurred_image)
     pred = pred_func(blurred_image[np.newaxis, ...])[0]
     # Normalize the values, so they lie in [0, 1] interval.
     normalized_entropy = (entropy - fully_blurred_img_entropy) / (
