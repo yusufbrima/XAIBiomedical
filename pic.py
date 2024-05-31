@@ -1,823 +1,309 @@
-import click
-import logging
-import os
-from pathlib import Path
-from data import DataLoad
-from utils import Utils
-from model import Models
+import io
 import numpy as np
-import matplotlib.pyplot as plt
-from Download import downloader
-from pathlib import Path
-import seaborn as sns
-from sklearn.model_selection import train_test_split
-import pandas as pd
-import tensorflow as tf
-import random
-from saliencyAnalysis import Saliency,Main
-import saliency.core as saliency
-from saliency.metrics import pic
-from pic import compute_pic_metric, estimate_image_entropy, create_blurred_image,estimate_entropy, estimate_image_avg_entropy,compute_pic_metric_flag  
-import cv2
-from tf_keras_vis.utils.model_modifiers import ReplaceToLinear
-from tf_keras_vis.utils.scores import CategoricalScore
-from tf_keras_vis.utils import normalize
-from tf_keras_vis.gradcam import Gradcam
-from tf_keras_vis.gradcam_plus_plus import GradcamPlusPlus
-from tf_keras_vis.scorecam import Scorecam
-from tf_keras_vis.scorecam import Scorecam 
+import os
+from PIL import Image
+from scipy import interpolate
+from typing import Callable, List, NamedTuple, Optional, Sequence, Tuple
+import skimage.measure
+from scipy import stats    
 
-# tf.random.set_seed(42)
-# np.random.seed(42)
-# random.seed(42) 
-np.seterr(divide='ignore', invalid='ignore')
-
-CUSTOM_DATASETS = ["./Data/brainTumorDataPublic", "./Data/COVID-19_Radiography_Dataset"]
-# ds = "Covid"
-# experiments = "kapis"
-FONT_SIZE = 14
+def estimate_image_avg_entropy(image: np.ndarray) -> float:
+    entropy = (estimate_entropy(image) + estimate_image_entropy(image))/2.0
+    return entropy
 
 
-def show_image(im, title='', ax=None):
-  if ax is None:
-    fig, ax = plt.subplots(figsize=(12, 6))
-  ax.axis('off')
-  ax.imshow(im, cmap='gray')
-  ax.set_title(title,fontsize=FONT_SIZE)
+def estimate_image_entropy(im_orig: np.ndarray) -> float:
+    p = np.histogram(im_orig, bins=256, range=(im_orig.min(), im_orig.max()), density=True)[0]
+    im_entropy = stats.entropy(p, base=2)
+    return im_entropy
 
-
-def show_grayscale_image(im, title='', ax=None):
-  if ax is None:
-    plt.figure()
-  plt.axis('off')
-
-  plt.imshow(im, cmap=plt.cm.gray, vmin=0, vmax=1)
-  plt.title(title, fontsize=FONT_SIZE)
-
-
-def show_curve_xy(x, y, title='PIC', label=None, color='blue',
-    ax=None):
-  if ax is None:
-    fig, ax = plt.subplots(figsize=(12, 6))
-  auc = np.trapz(y) / y.size
-  label = f'{label}, AUC={auc:.3f}'
-  ax.plot(x, y, label=label, color=color)
-  ax.set_title(title, fontsize=FONT_SIZE)
-  ax.set_xlim([0.0, 1.1])
-  ax.set_ylim([-0.1, 1.1])
-  ax.set_xlabel('Normalized estimation of entropy', fontsize=FONT_SIZE)
-  ax.set_ylabel('Predicted score', fontsize=FONT_SIZE)
-  # set the legend including fontsize
-  ax.legend(fontsize=FONT_SIZE)
-  # add grid
-  ax.grid(True)
-
-
-def show_curve(compute_pic_metric_result, title='PIC', label=None, color='blue',
-    ax=None):
-  show_curve_xy(compute_pic_metric_result.curve_x,
-                compute_pic_metric_result.curve_y, title=title, label=label,
-                color=color,
-                ax=ax)
-
-
-def show_blurred_images_with_scores(compute_pic_metric_result):
-  # Get model prediction scores.
-  images_to_display = compute_pic_metric_result.blurred_images
-  scores = compute_pic_metric_result.predictions
-  thresholds = compute_pic_metric_result.thresholds
-
-  # Visualize blurred images.
-  nrows = (len(images_to_display) - 1) // 5 + 1
-  fig, ax = plt.subplots(nrows=nrows, ncols=5,
-                         figsize=(20, 20 / 5 * nrows))
-  for i in range(len(images_to_display)):
-    row = i // 5
-    col = i % 5
-    title = f'Score: {scores[i]:.3f}\nThreshold: {thresholds[i]:.3f}'
-    show_image(images_to_display[i], title=title, ax=ax[row, col])
-
-
-# Define prediction function.
-def create_predict_function_softmax(class_idx, model):
-  """Creates the model prediction function that can be passed to compute_pic_metcompute_picric method.
-
-    The function returns the softmax value for the Softmax Information Curve.
-  Args:
-    class_idx: the index of the class for which the model prediction should
-      be returned.
-  """
-
-  def predict(image_batch):
-    """Returns model prediction for a batch of images.
-
-    The method receives a batch of images in uint8 format. The method is responsible to
-    convert the batch to whatever format required by the model. In this particular
-    implementation the conversion is achieved by calling preprocess_input().
+def estimate_entropy(image: np.ndarray) -> float:
+    """Estimates the amount of information in a given image.
 
     Args:
-      image_batch: batch of images of dimension [B, H, W, C].
-
+      image: an image, which entropy should be estimated. The dimensions of the
+        array should be [H, W] or [H, W, C] of type uint8 or float.
     Returns:
-      Predictions of dimension [B].
+      The estimated amount of information in the image.
     """
-    # image_batch = tf.keras.applications.vgg16.preprocess_input(image_batch)
-    score = model(image_batch)[:, class_idx]
-    return score.numpy()
+    # Normalize the image to range [0, 255] if it's in float format
+    if image.dtype == np.float32 or image.dtype == np.float64:
+        image = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255
+        image = image.astype(np.uint8)
 
-  return predict
+    if len(image.shape) == 2:  # Single-channel image
+        pil_image = Image.fromarray(image)
+    elif len(image.shape) == 3 and image.shape[2] == 1:  # Single-channel image as [H, W, 1]
+        pil_image = Image.fromarray(image[:, :, 0])
+    else:  # Multi-channel image
+        pil_image = Image.fromarray(image)
 
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format='webp', lossless=True, quality=100)
+    buffer.seek(0, os.SEEK_END)
+    length = buffer.tell()
+    buffer.close()
+    
+    return length
 
-
-# Define prediction function.
-def create_predict_function_accuracy(class_idx, model):
-  """Creates the model prediction function that can be passed to compute_pic_metric method.
-
-    The function returns the accuracy for the Accuracy Information Curve.
+def create_blurred_image(full_img: np.ndarray, pixel_mask: np.ndarray,
+    method: str = 'linear') -> np.ndarray:
+  """ Creates a blurred (interpolated) image.
 
   Args:
-    class_idx: the index of the class for which the model prediction score should
-      be returned.
-  """
-
-  def predict(image_batch):
-    """Returns model accuracy for a batch of images.
-
-    The method receives a batch of images in uint8 format. The method is responsible to
-    convert the batch to whatever format required by the model. In this particular
-    implementation the conversion is achieved by calling preprocess_input().
-
-    Args:
-      image_batch: batch of images of dimension [B, H, W, C].
+    full_img: an original input image that should be used as the source for
+      interpolation. The image should be represented by a numpy array with
+      dimensions [H, W, C] or [H, W].
+    pixel_mask: a binary mask, where 'True' values represent pixels that should
+      be retrieved from the original image as the source for the interpolation
+      and 'False' values represent pixels, which values should be found. The
+      method always sets the corner pixels of the mask to True. The mask
+      dimensions should be [H, W].
+    method: the method to use for the interpolation. The 'linear' method is
+      recommended. The alternative value is 'nearest'.
 
     Returns:
-      Predictions of dimension [B], where every element is either 1.0 for correct
-      prediction or 0.0 for incorrect prediction.
-    """
-    # image_batch = tf.keras.applications.vgg16.preprocess_input(image_batch)
-    scores = model(image_batch)
-    arg_max = np.argmax(scores, axis=1)
-    accuracy = arg_max == class_idx
-    return np.ones_like(arg_max) * accuracy
-
-  return predict
-
-
-def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experiments = "base", n_samples = 1000):
-    models = Main.load_models(n =3, file_path=f"./Data/{ds}_Evaluation_Results.csv")
-    model = tf.keras.models.load_model(f"./Models/{ds}_{models[model_indx]}.keras")
-
-    logging.info("Computing saliency masks, this may take a while...")
-    idxs = Saliency.pick_indices(dl, n = 3)
-    sa =  Saliency(model, dl, idxs, masked=masked, dataset=ds)
-
-    
-    # Construct the saliency object. This doesn't yet compute the saliency mask, it just sets up the necessary ops.
-    # We use Guided Integrated Gradients as an example saliency (see https://arxiv.org/abs/2106.09788).
-    guided_ig = saliency.GuidedIG()
-    
-    # Define saliency thresholds
-    saliency_thresholds = [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.07, 0.10, 0.13, 0.21, 0.34, 0.5, 0.75]
-    gig_aic_individual_results = []
-    rnd_aic_individual_results = []
-    gig_sic_individual_results = []
-    rnd_sic_individual_results = []
-    vanilla_aic_individual_results = []
-    smoothgrad_aic_individual_results = []
-    vanilla_sic_individual_results = []
-    smoothgrad_sic_individual_results = []
-    xrai_aic_individual_results = []
-    xrai_sic_individual_results = []
-    gradcam_aic_individual_results = []
-    gradcam_sic_individual_results = []
-    gradcamplusplus_aic_individual_results = []
-    gradcamplusplus_sic_individual_results = []
-    scorecam_aic_individual_results = []
-    scorecam_sic_individual_results = []
-
-    # Construct the saliency object. This alone doesn't do anthing.
-    gradient_saliency = saliency.GradientSaliency()
- 
-
-    for idx in range(len(dl.X_)):
-        im_orig = dl.X_[idx]
-        
-        replace2linear = ReplaceToLinear()
-        score = CategoricalScore([dl.y[idx]])
-        
-        predictions,prediction_class,call_model_args,pred_prob = sa.predict(im_orig)
-
-        # Create a random mask for the initial fully blurred image.
-        random_mask = pic.generate_random_mask(image_height=im_orig.shape[0],
-                                        image_width=im_orig.shape[1],
-                                        fraction=0.01)
-        
-        # Estimate entropy of the completely blurred image.
-        fully_blurred_img = create_blurred_image(full_img=im_orig, pixel_mask=random_mask)
-        # Estimate entropy of the original image.
-        if experiments == "base":
-            original_img_entropy = estimate_image_entropy(im_orig)
-            fully_blurred_img_entropy = estimate_image_entropy(fully_blurred_img)
-        elif experiments == "kapis":
-          original_img_entropy = estimate_entropy(im_orig)
-          fully_blurred_img_entropy = estimate_entropy(fully_blurred_img)
-        else:
-            original_img_entropy = estimate_image_avg_entropy(im_orig)
-            fully_blurred_img_entropy = estimate_image_avg_entropy(fully_blurred_img)
-
-        pred_func_sic = create_predict_function_softmax(class_idx=prediction_class, model=model)
-
-        pred = pred_func_sic(im_orig[np.newaxis, ...])
-        pred_blurred = pred_func_sic(fully_blurred_img[np.newaxis, ...])
-
-        # We want to compute PIC only if the prediction of the original image is higher than the prediction of the blurred image.
-        # And the entropy of the original image is higher than the entropy of the fully blurred image.
-        if pred > pred_blurred:
-           if original_img_entropy > fully_blurred_img_entropy:
-                baseline = np.zeros(im_orig.shape)
-
-
-
-                # Compute the Guided IG saliency.
-                guided_ig_mask_3d = guided_ig.GetMask(
-                    im_orig, sa.call_model_function, call_model_args, x_steps=25, x_baseline=baseline,
-                    max_dist=1.0, fraction=0.5)
-
-                # Call the visualization methods to convert the 3D tensors to 2D grayscale.
-                guided_ig_mask_grayscale = saliency.VisualizeImageGrayscale(guided_ig_mask_3d)
-
-
-                # Construct the saliency object. This alone doesn't do anthing.
-                integrated_gradients = saliency.IntegratedGradients()
-                
-                # Compute the vanilla mask and the smoothed mask.
-                vanilla_integrated_gradients_mask_3d = integrated_gradients.GetMask(
-                        im_orig, sa.call_model_function, call_model_args, x_steps=25, x_baseline=baseline, batch_size=20)
-                # Smoothed mask for integrated gradients will take a while since we are doing nsamples * nsamples computations.
-                smoothgrad_integrated_gradients_mask_3d = integrated_gradients.GetSmoothedMask(
-                        im_orig, sa.call_model_function, call_model_args, x_steps=25, x_baseline=baseline, batch_size=20)
-
-                # Call the visualization methods to convert the 3D tensors to 2D grayscale.
-                vanilla_mask_grayscale = saliency.VisualizeImageGrayscale(vanilla_integrated_gradients_mask_3d)
-                smoothgrad_mask_grayscale = saliency.VisualizeImageGrayscale(smoothgrad_integrated_gradients_mask_3d)
-
-                # Construct the saliency object. This alone doesn't do anthing.
-                xrai_object = saliency.XRAI()
-
-                # Compute XRAI attributions with default parameters
-                xrai_attributions = xrai_object.GetMask(im_orig, sa.call_model_function, call_model_args, batch_size=20)
-
-                # Show most salient 30% of the image
-                mask = xrai_attributions > np.percentile(xrai_attributions, 70)
-                im_mask =  np.array(im_orig)
-                im_mask[~mask] = 0
-                
-
-                # Create Gradcam object
-                gradcam = Gradcam(model,
-                                model_modifier=replace2linear,
-                                clone=True)
-
-                # Generate heatmap with GradCAM
-                cam = gradcam(score,im_orig,penultimate_layer=-1)
-
-                gradcam_saliency_map = normalize(cam)
-
-                # Create GradCAM++ object
-                gradcam = GradcamPlusPlus(model,
-                                        model_modifier=replace2linear,
-                                        clone=True)
-                
-                # Generate heatmap with GradCAM++
-                gradcamplusplus = gradcam(score,
-                            im_orig,
-                            penultimate_layer=-1)
-
-                cam = normalize(gradcamplusplus)
-
-                gradcamplusplus_saliency_map = np.expand_dims(np.squeeze(cam), axis=2)
-                
-                # squeeze and expand the channel dimension
-                gradcam_saliency_map = np.expand_dims(np.squeeze(gradcam_saliency_map), axis=2)
-
-                
-                # Create ScoreCAM object
-                scorecam = Scorecam(model)
-
-                # Generate heatmap with ScoreCAM
-                scorecam = scorecam(score, im_orig, penultimate_layer=-1)
-
-                cam = normalize(scorecam)
-
-                scorecam_saliency_map = np.expand_dims(np.squeeze(cam), axis=2)
-           
-
-                # print(guided_ig_mask_3d.shape, vanilla_integrated_gradients_mask_3d.shape, smoothgrad_integrated_gradients_mask_3d.shape, xrai_attributions.shape)
-                # check if color channel is missing in xrai attributions add it
-                if len(xrai_attributions.shape) == 2:
-                    xrai_attributions = np.expand_dims(xrai_attributions, axis=2)
-                # Softmax Information Curve (SIC)
-                gig_saliency_map = np.abs(np.sum(guided_ig_mask_3d, axis=2))
-                vanilla_saliency_map = np.abs(np.sum(vanilla_integrated_gradients_mask_3d, axis=2))
-                smoothgrad_saliency_map = np.abs(np.sum(smoothgrad_integrated_gradients_mask_3d, axis=2))
-                xrai_saliency_map = np.abs(np.sum(xrai_attributions, axis=2))
-                gradcam_saliency_map = np.abs(np.sum(gradcam_saliency_map, axis=2))
-                gradcamplusplus_saliency_map = np.abs(np.sum(gradcamplusplus_saliency_map, axis=2))
-                scorecam_saliency_map = np.abs(np.sum(scorecam_saliency_map, axis=2))
-
-                sic_flag =  compute_pic_metric_flag(
-                    img=im_orig,
-                    random_mask=random_mask,
-                    pred_func=pred_func_sic,
-                    experiment=experiments
-                )
-
-                print("Current condition is ", sic_flag)
-
-                # # Softmax Information Curve (SIC)
-                gig_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=gig_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                vanilla_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=vanilla_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                smoothgrad_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=smoothgrad_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                
-                xrai_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=xrai_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                
-                gradcam_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=gradcam_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                gradcamplusplus_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=gradcamplusplus_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                scorecam_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=scorecam_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-
-                # # For comparison, compute PIC for random saliency map.
-                rnd_saliency_map = np.random.random(size=(im_orig.shape[0], im_orig.shape[1]))
-                rnd_result_sic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=rnd_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_sic,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                gig_sic_individual_results.append(gig_result_sic)
-                rnd_sic_individual_results.append(rnd_result_sic)
-                vanilla_sic_individual_results.append(vanilla_result_sic)
-                smoothgrad_sic_individual_results.append(smoothgrad_result_sic)
-                xrai_sic_individual_results.append(xrai_result_sic)
-                gradcam_sic_individual_results.append(gradcam_result_sic)
-                gradcamplusplus_sic_individual_results.append(gradcamplusplus_result_sic)
-                scorecam_sic_individual_results.append(scorecam_result_sic)
-                
-
-                # # Accuracy Information Curve (AIC)
-                pred_func_accuracy = create_predict_function_accuracy(prediction_class, model)
-
-                aic_flag =  compute_pic_metric_flag(
-                    img=im_orig,
-                    random_mask=random_mask,
-                    pred_func=pred_func_accuracy,
-                    experiment=experiments
-                )
-
-                print("Current condition is ", aic_flag)
-                if aic_flag:
-
-                  gig_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=gig_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-                  vanilla_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=vanilla_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000)
-                  
-                  smoothgrad_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=smoothgrad_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-
-                  # # For comparison, compute PIC for random saliency map.
-                  rnd_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=rnd_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-                  xrai_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=xrai_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-                  gradcam_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=gradcam_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-                  gradcamplusplus_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=gradcamplusplus_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-                  scorecam_result_aic = compute_pic_metric(img=im_orig,
-                                                      saliency_map=scorecam_saliency_map,
-                                                      random_mask=random_mask,
-                                                      pred_func=pred_func_accuracy,
-                                                      min_pred_value=0.5,
-                                                      saliency_thresholds=saliency_thresholds,
-                                                      keep_monotonous=True,
-                                                      num_data_points=1000,
-                                                      experiment=experiments)
-                  gig_aic_individual_results.append(gig_result_aic)
-                  rnd_aic_individual_results.append(rnd_result_aic)
-                  vanilla_aic_individual_results.append(vanilla_result_aic)
-                  xrai_aic_individual_results.append(xrai_result_aic)
-                  smoothgrad_aic_individual_results.append(smoothgrad_result_aic)
-                  gradcam_aic_individual_results.append(gradcam_result_aic)
-                  gradcamplusplus_aic_individual_results.append(gradcamplusplus_result_aic)
-                  scorecam_aic_individual_results.append(scorecam_result_aic)
-
-
-
-                print(len(gig_aic_individual_results), len(rnd_aic_individual_results))
-        #1300
-        if len(gig_aic_individual_results) >= n_samples:
-            break
-    return gig_aic_individual_results, rnd_aic_individual_results, gig_sic_individual_results, rnd_sic_individual_results, \
-        vanilla_aic_individual_results, smoothgrad_aic_individual_results, vanilla_sic_individual_results, \
-        smoothgrad_sic_individual_results, xrai_aic_individual_results, xrai_sic_individual_results, gradcam_aic_individual_results, \
-        gradcam_sic_individual_results, gradcamplusplus_aic_individual_results, gradcamplusplus_sic_individual_results, scorecam_aic_individual_results, scorecam_sic_individual_results
-                
-
-
-@click.command()
-@click.option("--ds",default="BrainTumor", help="The dataset to use for training the model.")
-@click.option("--experiments",default="base", help="The experiment to run.")
-@click.option("--n_samples",default=1000, help="The number of datapoints to run the experiment on.")
-def main(ds, experiments, n_samples):
-  if ds == "BrainTumor":
-    dl =  DataLoad()
-
-    dl.load()
-    model_indx = 0
-
-    gig_aic_individual_results, rnd_aic_individual_results, gig_sic_individual_results, rnd_sic_individual_results, \
-    vanilla_aic_individual_results, smoothgrad_aic_individual_results, vanilla_sic_individual_results, \
-    smoothgrad_sic_individual_results, xrai_aic_individual_results, xrai_sic_individual_results, gradcam_aic_individual_results, \
-    gradcam_sic_individual_results, gradcamplusplus_aic_individual_results, gradcamplusplus_sic_individual_results, scorecam_aic_individual_results, scorecam_sic_individual_results = compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experiments = experiments, n_samples = n_samples)
-    print(len(gig_aic_individual_results), len(rnd_aic_individual_results))
-    gig_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gig_aic_individual_results, method='median')
-    rnd_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=rnd_aic_individual_results, method='median')
-    vanilla_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=vanilla_aic_individual_results, method='median')
-    smoothgrad_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=smoothgrad_aic_individual_results, method='median')
-    xrai_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=xrai_aic_individual_results, method='median')
-    gradcam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcam_aic_individual_results, method='median')
-    gradcamplusplus_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcamplusplus_aic_individual_results, method='median')
-    scorecam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=scorecam_aic_individual_results, method='median')
-
-    # save these aggregated results as pandas csv
-    data = {'Guided IG': gig_agg_result, 'Random': rnd_agg_result, 'Vanilla IG': vanilla_agg_result, 'SmoothGrad IG': smoothgrad_agg_result, 'XRAI': xrai_agg_result, 'GradCAM': gradcam_agg_result, 'GradCAM++': gradcamplusplus_agg_result, 'ScoreCAM': scorecam_agg_result}
-    df = pd.DataFrame(data)
-    df.to_csv(f"./Data/{ds}_AIC_Evaluation_Results_TEMP.csv")
-    # Save the original results as well
-    data = {'Guided IG': gig_aic_individual_results, 'Random': rnd_aic_individual_results, 'Vanilla IG': vanilla_aic_individual_results, 'SmoothGrad IG': smoothgrad_aic_individual_results, 'XRAI': xrai_aic_individual_results, 'GradCAM': gradcam_aic_individual_results, 'GradCAM++': gradcamplusplus_aic_individual_results, 'ScoreCAM': scorecam_aic_individual_results}
-    df = pd.DataFrame(data)
-    df.to_csv(f"./Data/{ds}_AIC_Individual_Results.csv")
-
-
-    # Plot the aggregated results.
-    fig, ax = plt.subplots(figsize=(12, 6))
-    title = "Aggregated Accuracy Information Curve (AIC)"
-    show_curve(gig_agg_result, title=f'{title}', label='Guided IG', color='blue', ax=ax)
-    show_curve(rnd_agg_result, title=f'{title}', label='Random', color='red', ax=ax)
-    show_curve(vanilla_agg_result, title=f'{title}', label='Vanilla IG', color='green', ax=ax)
-    show_curve(smoothgrad_agg_result, title=f'{title}', label='SmoothGrad IG', color='orange', ax=ax)
-    show_curve(xrai_agg_result, title=f'{title}', label='XRAI', color='purple', ax=ax)
-    show_curve(gradcam_agg_result, title=f'{title}', label='GradCAM', color='black', ax=ax)
-    show_curve(gradcamplusplus_agg_result, title=f'{title}', label='GradCAM++', color='brown', ax=ax)
-    show_curve(scorecam_agg_result, title=f'{title}', label='ScoreCAM', color='pink', ax=ax)
-    plt.savefig(f'./Figures/{ds}_{experiments}_AIC_Aggregated.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    gig_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gig_sic_individual_results, method='median')
-    rnd_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=rnd_sic_individual_results, method='median')
-    vanilla_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=vanilla_sic_individual_results, method='median')
-    smoothgrad_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=smoothgrad_sic_individual_results, method='median')
-    xrai_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=xrai_sic_individual_results, method='median')
-    gradcam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcam_sic_individual_results, method='median')
-    gradcamplusplus_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcamplusplus_sic_individual_results, method='median')
-    scorecam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=scorecam_sic_individual_results, method='median')
-
-    # save these aggregated results as pandas csv
-    data = {'Guided IG': gig_agg_result, 'Random': rnd_agg_result, 'Vanilla IG': vanilla_agg_result, 'SmoothGrad IG': smoothgrad_agg_result, 'XRAI': xrai_agg_result, 'GradCAM': gradcam_agg_result, 'GradCAM++': gradcamplusplus_agg_result, 'ScoreCAM': scorecam_agg_result}
-    df = pd.DataFrame(data)
-    df.to_csv(f"./Data/{ds}_{experiments}_SIC_Evaluation_Results.csv")
-    # Save the original results as well
-    data = {'Guided IG': gig_sic_individual_results, 'Random': rnd_sic_individual_results, 'Vanilla IG': vanilla_sic_individual_results, 'SmoothGrad IG': smoothgrad_sic_individual_results, 'XRAI': xrai_sic_individual_results, 'GradCAM': gradcam_sic_individual_results, 'GradCAM++': gradcamplusplus_sic_individual_results, 'ScoreCAM': scorecam_sic_individual_results}
-    df = pd.DataFrame(data)
-    df.to_csv(f"./Data/{ds}_{experiments}_SIC_Individual_Results.csv")
-
-    # want to plot the mean and deviation from it for each method
-
-
-
-    # Plot the aggregated results.
-    fig, ax = plt.subplots(figsize=(12, 6))
-    title = "Aggregated Softmax Information Curve (SIC)"
-    show_curve(gig_agg_result, title=f'{title}', label='Guided IG', color='blue', ax=ax)
-    show_curve(rnd_agg_result, title=f'{title}', label='Random', color='red', ax=ax)
-    show_curve(vanilla_agg_result, title=f'{title}', label='Vanilla IG', color='green', ax=ax)
-    show_curve(smoothgrad_agg_result, title=f'{title}', label='SmoothGrad IG', color='orange', ax=ax)
-    show_curve(xrai_agg_result, title=f'{title}', label='XRAI', color='purple', ax=ax)
-    show_curve(gradcam_agg_result, title=f'{title}', label='GradCAM', color='black', ax=ax)
-    show_curve(gradcamplusplus_agg_result, title=f'{title}', label='GradCAM++', color='brown', ax=ax)
-    show_curve(scorecam_agg_result, title=f'{title}', label='ScoreCAM', color='pink', ax=ax)
-    plt.savefig(f'./Figures/{ds}_{experiments}_SIC_Aggregated.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gig_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GIG_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gig_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GIG_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    # Do the same for the others 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(vanilla_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_Vanilla_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(vanilla_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_Vanilla_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(smoothgrad_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_SmoothGrad_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(smoothgrad_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_SmoothGrad_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(xrai_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_XRAI_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(xrai_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_XRAI_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcam_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAM_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcam_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAM_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcamplusplus_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAMPlusPlus_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcamplusplus_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAMPlusPlus_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(scorecam_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_ScoreCAM_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
+      A numpy array that encodes the blurred image with exactly the same
+      dimensions and type as `full_img`.
+  """
+  data_type = full_img.dtype
+  has_color_channel = full_img.ndim > 2
+  if not has_color_channel:
+    full_img = np.expand_dims(full_img, axis=2)
+  channels = full_img.shape[2]
+
+  # Always include corners.
+  pixel_mask = pixel_mask.copy()
+  height = pixel_mask.shape[0]
+  width = pixel_mask.shape[1]
+  pixel_mask[
+    [0, 0, height - 1, height - 1], [0, width - 1, 0, width - 1]] = True
+
+  mean_color = np.mean(full_img, axis=(0, 1))
+
+  # If the mask consists of all pixels set to True then return the original
+  # image.
+  if np.all(pixel_mask):
+    return full_img
+
+  blurred_img = full_img * np.expand_dims(pixel_mask, axis=2).astype(
+      np.float32)
+
+  # Interpolate the unmasked values of the image pixels.
+  for channel in range(channels):
+    data_points = np.argwhere(pixel_mask > 0)
+    data_values = full_img[:, :, channel][tuple(data_points.T)]
+    unknown_points = np.argwhere(pixel_mask == 0)
+    interpolated_values = interpolate.griddata(np.array(data_points),
+                                               np.array(data_values),
+                                               np.array(unknown_points),
+                                               method=method,
+                                               fill_value=mean_color[channel])
+    blurred_img[:, :, channel][tuple(unknown_points.T)] = interpolated_values
+
+  if not has_color_channel:
+    blurred_img = blurred_img[:, :, 0]
+
+  if issubclass(data_type.type, np.integer):
+    blurred_img = np.round(blurred_img)
+
+  return blurred_img.astype(data_type)
+
+
+class PicMetricResult(NamedTuple):
+  """Holds results of compute_pic_metric(...) method."""
+  # x-axis coordinates of PIC curve data points.
+  curve_x: Sequence[float]
+  # y-axis coordinates of PIC curve data points.
+  curve_y: Sequence[float]
+  # A sequence of intermediate blurred images used for PIC computation with
+  # the fully blurred image in front and the original image at the end.
+  blurred_images: Sequence[np.ndarray]
+  # Model predictions for images in the `blurred_images` sequence.
+  predictions: Sequence[float]
+  # Saliency thresholds that were used to generate corresponding
+  # `blurred_images`.
+  thresholds: Sequence[float]
+  # Area under the curve.
+  auc: float
+
+def compute_pic_metric_flag(
+    img: np.ndarray,
+    random_mask: np.ndarray,
+    pred_func: Callable[[np.ndarray], Sequence[float]],
+    experiment: Optional[str] = "base",
+):
+  blurred_images = []
+  predictions = []
+
+
+  # Estimate entropy of the completely blurred image.
+  fully_blurred_img = create_blurred_image(full_img=img, pixel_mask=random_mask)
+
+  # Estimate entropy of the original image.
+  if experiment == "base":
+    original_img_entropy = estimate_image_entropy(img)
+    fully_blurred_img_entropy = estimate_image_entropy(fully_blurred_img)
   
-  elif ds == "Covid":
-    dl =  DataLoad(datapath = Path(f"{CUSTOM_DATASETS[1]}"),outdir = f'{CUSTOM_DATASETS[1]}.npz', segmented=False)
-    dl.load(masked=False)
-
-    model_indx = 0
-
-    gig_aic_individual_results, rnd_aic_individual_results, gig_sic_individual_results, rnd_sic_individual_results, \
-    vanilla_aic_individual_results, smoothgrad_aic_individual_results, vanilla_sic_individual_results, \
-    smoothgrad_sic_individual_results, xrai_aic_individual_results, xrai_sic_individual_results, gradcam_aic_individual_results, \
-    gradcam_sic_individual_results, gradcamplusplus_aic_individual_results, gradcamplusplus_sic_individual_results, scorecam_aic_individual_results, scorecam_sic_individual_results = compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor")
-    print(len(gig_aic_individual_results), len(rnd_aic_individual_results))
-    gig_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gig_aic_individual_results, method='median')
-    rnd_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=rnd_aic_individual_results, method='median')
-    vanilla_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=vanilla_aic_individual_results, method='median')
-    smoothgrad_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=smoothgrad_aic_individual_results, method='median')
-    xrai_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=xrai_aic_individual_results, method='median')
-    gradcam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcam_aic_individual_results, method='median')
-    gradcamplusplus_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcamplusplus_aic_individual_results, method='median')
-    scorecam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=scorecam_aic_individual_results, method='median')
-
-    # save these aggregated results as pandas csv
-    data = {'Guided IG': gig_agg_result, 'Random': rnd_agg_result, 'Vanilla IG': vanilla_agg_result, 'SmoothGrad IG': smoothgrad_agg_result, 'XRAI': xrai_agg_result, 'GradCAM': gradcam_agg_result, 'GradCAM++': gradcamplusplus_agg_result, 'ScoreCAM': scorecam_agg_result}
-    df = pd.DataFrame(data)
-    df.to_csv(f"./Data/{ds}_{experiments}_AIC_Evaluation_Results.csv")
-    
-
-    # Plot the aggregated results.
-    fig, ax = plt.subplots(figsize=(12, 6))
-    title = "Aggregated Accuracy Information Curve (AIC)"
-    show_curve(gig_agg_result, title=f'{title}', label='Guided IG', color='blue', ax=ax)
-    show_curve(rnd_agg_result, title=f'{title}', label='Random', color='red', ax=ax)
-    show_curve(vanilla_agg_result, title=f'{title}', label='Vanilla IG', color='green', ax=ax)
-    show_curve(smoothgrad_agg_result, title=f'{title}', label='SmoothGrad IG', color='orange', ax=ax)
-    show_curve(xrai_agg_result, title=f'{title}', label='XRAI', color='purple', ax=ax)
-    show_curve(gradcam_agg_result, title=f'{title}', label='GradCAM', color='black', ax=ax)
-    show_curve(gradcamplusplus_agg_result, title=f'{title}', label='GradCAM++', color='brown', ax=ax)
-    show_curve(scorecam_agg_result, title=f'{title}', label='ScoreCAM', color='pink', ax=ax)
-    plt.savefig(f'./Figures/{ds}_{experiments}_AIC_Aggregated.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    gig_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gig_sic_individual_results, method='median')
-    rnd_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=rnd_sic_individual_results, method='median')
-    vanilla_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=vanilla_sic_individual_results, method='median')
-    smoothgrad_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=smoothgrad_sic_individual_results, method='median')
-    xrai_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=xrai_sic_individual_results, method='median')
-    gradcam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcam_sic_individual_results, method='median')
-    gradcamplusplus_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gradcamplusplus_sic_individual_results, method='median')
-    scorecam_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=scorecam_sic_individual_results, method='median')
-
-    # save these aggregated results as pandas csv
-    data = {'Guided IG': gig_agg_result, 'Random': rnd_agg_result, 'Vanilla IG': vanilla_agg_result, 'SmoothGrad IG': smoothgrad_agg_result, 'XRAI': xrai_agg_result, 'GradCAM': gradcam_agg_result, 'GradCAM++': gradcamplusplus_agg_result, 'ScoreCAM': scorecam_agg_result}
-    df = pd.DataFrame(data)
-    df.to_csv(f"./Data/{ds}_{experiments}_SIC_Evaluation_Results.csv")
-
-
-    # Plot the aggregated results.
-    fig, ax = plt.subplots(figsize=(12, 6))
-    title = "Aggregated Softmax Information Curve (SIC)"
-    show_curve(gig_agg_result, title=f'{title}', label='Guided IG', color='blue', ax=ax)
-    show_curve(rnd_agg_result, title=f'{title}', label='Random', color='red', ax=ax)
-    show_curve(vanilla_agg_result, title=f'{title}', label='Vanilla IG', color='green', ax=ax)
-    show_curve(smoothgrad_agg_result, title=f'{title}', label='SmoothGrad IG', color='orange', ax=ax)
-    show_curve(xrai_agg_result, title=f'{title}', label='XRAI', color='purple', ax=ax)
-    show_curve(gradcam_agg_result, title=f'{title}', label='GradCAM', color='black', ax=ax)
-    show_curve(gradcamplusplus_agg_result, title=f'{title}', label='GradCAM++', color='brown', ax=ax)
-    show_curve(scorecam_agg_result, title=f'{title}', label='ScoreCAM', color='pink', ax=ax)
-    plt.savefig(f'./Figures/{ds}_{experiments}_SIC_Aggregated.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gig_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GIG_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gig_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GIG_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    # Do the same for the others 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(vanilla_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_Vanilla_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(vanilla_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_Vanilla_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(smoothgrad_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_SmoothGrad_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(smoothgrad_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_SmoothGrad_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(xrai_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_XRAI_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(xrai_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_XRAI_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcam_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAM_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcam_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAM_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcamplusplus_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAMPlusPlus_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(gradcamplusplus_sic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_GradCAMPlusPlus_Blurred_SIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    show_blurred_images_with_scores(scorecam_aic_individual_results[0])
-    plt.savefig(f'./Figures/{ds}_{experiments}_ScoreCAM_Blurred_AIC_Images.tiff', format='tiff', dpi=300)
-    plt.close(fig)
-  
+  elif experiment == "kapis":
+    original_img_entropy = estimate_entropy(img)
+    fully_blurred_img_entropy = estimate_entropy(fully_blurred_img)
   else:
-    logging.info("Invalid dataset selected, please try again")
-if __name__ == "__main__":
-    main()
+    original_img_entropy = estimate_image_avg_entropy(img)
+    fully_blurred_img_entropy = estimate_image_avg_entropy(fully_blurred_img)
+  
+
+  # Compute model prediction for the original image.
+  original_img_pred = pred_func(img[np.newaxis, ...])[0]
+  
+  # print(f'Original image entropy: {original_img_entropy} Entropy of the completely blurred image: {fully_blurred_img_entropy}')
+
+  # if original_img_pred < min_pred_value:
+  #   print(f'Original image prediction is below the threshold: {original_img_pred}')
+
+  # Compute model prediction for the completely blurred image.
+  fully_blurred_img_pred = pred_func(fully_blurred_img[np.newaxis, ...])[0]
+  
+  blurred_images.append(fully_blurred_img)
+  predictions.append(fully_blurred_img_pred)
+
+    # If the entropy of the completely blurred image is higher or equal to the
+  # entropy of the original image then the metric cannot be used for this
+  # image. Don't include this image in the aggregated result.
+  if original_img_entropy >= fully_blurred_img_entropy and original_img_pred >= fully_blurred_img_pred:
+    return True
+  else:
+    print(f'Fully blurred image entropy is higher or equal to the original image entropy: {fully_blurred_img_entropy}')
+    print(
+        'The model prediction score on the completely blurred image is not'
+        ' lower than the score on the original image. Catch the error and'
+        ' exclude this image from the evaluation. Blurred score: {}, original'
+        ' score {}'.format(fully_blurred_img_pred, original_img_pred))
+    return False
+    
+
+def compute_pic_metric(
+    img: np.ndarray,
+    saliency_map: np.ndarray,
+    random_mask: np.ndarray,
+    pred_func: Callable[[np.ndarray], Sequence[float]],
+    saliency_thresholds: Sequence[float],
+    min_pred_value: float = 0.8,
+    keep_monotonous: bool = True,
+    num_data_points: int = 1000,
+    experiment: Optional[str] = "base",
+):
+  blurred_images = []
+  predictions = []
+
+  # This list will contain mapping of image entropy for a given saliency
+  # threshold to model prediction.
+  entropy_pred_tuples = []
+
+  # Estimate entropy of the completely blurred image.
+  fully_blurred_img = create_blurred_image(full_img=img, pixel_mask=random_mask)
+
+  # Estimate entropy of the original image.
+  if experiment == "base":
+    original_img_entropy = estimate_image_entropy(img)
+    fully_blurred_img_entropy = estimate_image_entropy(fully_blurred_img)
+  
+  elif experiment == "kapis":
+    original_img_entropy = estimate_entropy(img)
+    fully_blurred_img_entropy = estimate_entropy(fully_blurred_img)
+  else:
+    original_img_entropy = estimate_image_avg_entropy(img)
+    fully_blurred_img_entropy = estimate_image_avg_entropy(fully_blurred_img)
+  
+
+  # Compute model prediction for the original image.
+  original_img_pred = pred_func(img[np.newaxis, ...])[0]
+  
+  # print(f'Original image entropy: {original_img_entropy} Entropy of the completely blurred image: {fully_blurred_img_entropy}')
+
+  # if original_img_pred < min_pred_value:
+  #   print(f'Original image prediction is below the threshold: {original_img_pred}')
+
+  # Compute model prediction for the completely blurred image.
+  fully_blurred_img_pred = pred_func(fully_blurred_img[np.newaxis, ...])[0]
+  
+  blurred_images.append(fully_blurred_img)
+  predictions.append(fully_blurred_img_pred)
+
+    # If the entropy of the completely blurred image is higher or equal to the
+  # entropy of the original image then the metric cannot be used for this
+  # image. Don't include this image in the aggregated result.
+  if fully_blurred_img_entropy >= original_img_entropy:
+    print(f'Fully blurred image entropy is higher or equal to the original image entropy: {fully_blurred_img_entropy}')
+
+  # If the score of the model on completely blurred image is higher or equal to
+  # the score of the model on the original image then the metric cannot be used
+  # for this image. Don't include this image in the aggregated result.
+  if fully_blurred_img_pred >= original_img_pred:
+    print(
+        'The model prediction score on the completely blurred image is not'
+        ' lower than the score on the original image. Catch the error and'
+        ' exclude this image from the evaluation. Blurred score: {}, original'
+        ' score {}'.format(fully_blurred_img_pred, original_img_pred))
+  # Iterate through saliency thresholds and compute prediction of the model
+  # for the corresponding blurred images with the saliency pixels revealed.
+  max_normalized_pred = 0.0
+  for threshold in saliency_thresholds:
+    quantile = np.quantile(saliency_map, 1 - threshold)
+    pixel_mask = saliency_map >= quantile
+    pixel_mask = np.logical_or(pixel_mask, random_mask)
+    blurred_image = create_blurred_image(full_img=img, pixel_mask=pixel_mask)
+    if experiment == "base":
+      entropy = estimate_image_entropy(blurred_image)
+    elif experiment == "kapis":
+      entropy = estimate_entropy(blurred_image)
+    else:
+      entropy = estimate_image_avg_entropy(blurred_image)
+    # entropy = estimate_image_entropy(blurred_image)
+    # entropy = estimate_entropy(blurred_image)
+    pred = pred_func(blurred_image[np.newaxis, ...])[0]
+    # Normalize the values, so they lie in [0, 1] interval.
+    normalized_entropy = (entropy - fully_blurred_img_entropy) / (
+        original_img_entropy - fully_blurred_img_entropy)
+    normalized_entropy = np.clip(normalized_entropy, 0.0, 1.0)
+    normalized_pred = (pred - fully_blurred_img_pred) / (
+        original_img_pred - fully_blurred_img_pred)
+    normalized_pred = np.clip(normalized_pred, 0.0, 1.0)
+    max_normalized_pred = max(max_normalized_pred, normalized_pred)
+
+    # Make normalized_pred only grow if keep_monotonous is true.
+    if keep_monotonous:
+      entropy_pred_tuples.append((normalized_entropy, max_normalized_pred))
+    else:
+      entropy_pred_tuples.append((normalized_entropy, normalized_pred))
+
+    blurred_images.append(blurred_image)
+    predictions.append(pred)
+
+  # Interpolate the PIC curve.
+  entropy_pred_tuples.append((0.0, 0.0))
+  entropy_pred_tuples.append((1.0, 1.0))
+
+  entropy_data, pred_data = zip(*entropy_pred_tuples)
+  interp_func = interpolate.interp1d(x=entropy_data, y=pred_data)
+
+  curve_x = np.linspace(start=0.0, stop=1.0, num=num_data_points,
+                        endpoint=False)
+  curve_y = np.asarray([interp_func(x) for x in curve_x])
+
+  curve_x = np.append(curve_x, 1.0)
+  curve_y = np.append(curve_y, 1.0)
+
+  auc = np.trapz(curve_y, curve_x)
+
+  blurred_images.append(img)
+  predictions.append(original_img_pred)
+
+  thresholds = [0.0] + list(saliency_thresholds) + [1.0]
+  
+#   return entropy_pred_tuples, fully_blurred_img
+  return PicMetricResult(curve_x=curve_x, curve_y=curve_y,
+                         blurred_images=blurred_images,
+                         predictions=predictions, thresholds=thresholds,
+                         auc=auc)
+

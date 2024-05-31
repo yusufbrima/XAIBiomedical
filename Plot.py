@@ -17,7 +17,7 @@ import random
 from saliencyAnalysis import Saliency,Main
 import saliency.core as saliency
 from saliency.metrics import pic
-from pic import compute_pic_metric, estimate_image_entropy, create_blurred_image,estimate_entropy, estimate_image_avg_entropy  
+from pic import compute_pic_metric, estimate_image_entropy, create_blurred_image,estimate_entropy, estimate_image_avg_entropy,compute_pic_metric_flag  
 import cv2
 from tf_keras_vis.utils.model_modifiers import ReplaceToLinear
 from tf_keras_vis.utils.scores import CategoricalScore
@@ -35,6 +35,7 @@ np.seterr(divide='ignore', invalid='ignore')
 CUSTOM_DATASETS = ["./Data/brainTumorDataPublic", "./Data/COVID-19_Radiography_Dataset"]
 # ds = "Covid"
 # experiments = "kapis"
+FONT_SIZE = 14
 
 
 def show_image(im, title='', ax=None):
@@ -42,7 +43,7 @@ def show_image(im, title='', ax=None):
     fig, ax = plt.subplots(figsize=(12, 6))
   ax.axis('off')
   ax.imshow(im, cmap='gray')
-  ax.set_title(title)
+  ax.set_title(title,fontsize=FONT_SIZE)
 
 
 def show_grayscale_image(im, title='', ax=None):
@@ -51,7 +52,7 @@ def show_grayscale_image(im, title='', ax=None):
   plt.axis('off')
 
   plt.imshow(im, cmap=plt.cm.gray, vmin=0, vmax=1)
-  plt.title(title)
+  plt.title(title, fontsize=FONT_SIZE)
 
 
 def show_curve_xy(x, y, title='PIC', label=None, color='blue',
@@ -61,12 +62,15 @@ def show_curve_xy(x, y, title='PIC', label=None, color='blue',
   auc = np.trapz(y) / y.size
   label = f'{label}, AUC={auc:.3f}'
   ax.plot(x, y, label=label, color=color)
-  ax.set_title(title, fontsize=12)
-  ax.set_xlim([0.0, 1.0])
-  ax.set_ylim([0.0, 1.0])
-  ax.set_xlabel('Fraction of image retained', fontsize=12)
-  ax.set_ylabel('Prediction score', fontsize=12)
-  ax.legend()
+  ax.set_title(title, fontsize=FONT_SIZE)
+  ax.set_xlim([0.0, 1.1])
+  ax.set_ylim([-0.1, 1.1])
+  ax.set_xlabel('Normalized estimation of entropy', fontsize=FONT_SIZE)
+  ax.set_ylabel('Predicted score', fontsize=FONT_SIZE)
+  # set the legend including fontsize
+  ax.legend(fontsize=FONT_SIZE)
+  # add grid
+  ax.grid(True)
 
 
 def show_curve(compute_pic_metric_result, title='PIC', label=None, color='blue',
@@ -159,7 +163,7 @@ def create_predict_function_accuracy(class_idx, model):
   return predict
 
 
-def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experiments = "base"):
+def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experiments = "base", n_samples = 1000):
     models = Main.load_models(n =3, file_path=f"./Data/{ds}_Evaluation_Results.csv")
     model = tf.keras.models.load_model(f"./Models/{ds}_{models[model_indx]}.keras")
 
@@ -228,8 +232,8 @@ def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experimen
 
         # We want to compute PIC only if the prediction of the original image is higher than the prediction of the blurred image.
         # And the entropy of the original image is higher than the entropy of the fully blurred image.
-        if pred >= pred_blurred:
-           if original_img_entropy >= fully_blurred_img_entropy:
+        if pred > pred_blurred:
+           if original_img_entropy > fully_blurred_img_entropy:
                 baseline = np.zeros(im_orig.shape)
 
 
@@ -321,6 +325,15 @@ def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experimen
                 gradcamplusplus_saliency_map = np.abs(np.sum(gradcamplusplus_saliency_map, axis=2))
                 scorecam_saliency_map = np.abs(np.sum(scorecam_saliency_map, axis=2))
 
+                sic_flag =  compute_pic_metric_flag(
+                    img=im_orig,
+                    random_mask=random_mask,
+                    pred_func=pred_func_sic,
+                    experiment=experiments
+                )
+
+                print("Current condition is ", sic_flag)
+
                 # # Softmax Information Curve (SIC)
                 gig_result_sic = compute_pic_metric(img=im_orig,
                                                     saliency_map=gig_saliency_map,
@@ -399,106 +412,117 @@ def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experimen
                                                     keep_monotonous=True,
                                                     num_data_points=1000,
                                                     experiment=experiments)
+                gig_sic_individual_results.append(gig_result_sic)
+                rnd_sic_individual_results.append(rnd_result_sic)
+                vanilla_sic_individual_results.append(vanilla_result_sic)
+                smoothgrad_sic_individual_results.append(smoothgrad_result_sic)
+                xrai_sic_individual_results.append(xrai_result_sic)
+                gradcam_sic_individual_results.append(gradcam_result_sic)
+                gradcamplusplus_sic_individual_results.append(gradcamplusplus_result_sic)
+                scorecam_sic_individual_results.append(scorecam_result_sic)
                 
 
                 # # Accuracy Information Curve (AIC)
                 pred_func_accuracy = create_predict_function_accuracy(prediction_class, model)
 
-                gig_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=gig_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                vanilla_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=vanilla_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000)
-                
-                smoothgrad_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=smoothgrad_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
+                aic_flag =  compute_pic_metric_flag(
+                    img=im_orig,
+                    random_mask=random_mask,
+                    pred_func=pred_func_accuracy,
+                    experiment=experiments
+                )
 
-                # # For comparison, compute PIC for random saliency map.
-                rnd_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=rnd_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                xrai_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=xrai_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                gradcam_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=gradcam_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                gradcamplusplus_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=gradcamplusplus_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                scorecam_result_aic = compute_pic_metric(img=im_orig,
-                                                    saliency_map=scorecam_saliency_map,
-                                                    random_mask=random_mask,
-                                                    pred_func=pred_func_accuracy,
-                                                    min_pred_value=0.5,
-                                                    saliency_thresholds=saliency_thresholds,
-                                                    keep_monotonous=True,
-                                                    num_data_points=1000,
-                                                    experiment=experiments)
-                
-                
-                gig_aic_individual_results.append(gig_result_aic)
-                rnd_aic_individual_results.append(rnd_result_aic)
-                gig_sic_individual_results.append(gig_result_sic)
-                rnd_sic_individual_results.append(rnd_result_sic)
-                vanilla_aic_individual_results.append(vanilla_result_aic)
-                smoothgrad_aic_individual_results.append(smoothgrad_result_aic)
-                vanilla_sic_individual_results.append(vanilla_result_sic)
-                smoothgrad_sic_individual_results.append(smoothgrad_result_sic)
-                xrai_aic_individual_results.append(xrai_result_aic)
-                xrai_sic_individual_results.append(xrai_result_sic)
-                gradcam_aic_individual_results.append(gradcam_result_aic)
-                gradcam_sic_individual_results.append(gradcam_result_sic)
-                gradcamplusplus_aic_individual_results.append(gradcamplusplus_result_aic)
-                gradcamplusplus_sic_individual_results.append(gradcamplusplus_result_sic)
-                scorecam_aic_individual_results.append(scorecam_result_aic)
-                scorecam_sic_individual_results.append(scorecam_result_sic)
+                print("Current condition is ", aic_flag)
+                if aic_flag:
+
+                  gig_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=gig_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+                  vanilla_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=vanilla_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000)
+                  
+                  smoothgrad_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=smoothgrad_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+
+                  # # For comparison, compute PIC for random saliency map.
+                  rnd_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=rnd_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+                  xrai_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=xrai_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+                  gradcam_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=gradcam_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+                  gradcamplusplus_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=gradcamplusplus_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+                  scorecam_result_aic = compute_pic_metric(img=im_orig,
+                                                      saliency_map=scorecam_saliency_map,
+                                                      random_mask=random_mask,
+                                                      pred_func=pred_func_accuracy,
+                                                      min_pred_value=0.5,
+                                                      saliency_thresholds=saliency_thresholds,
+                                                      keep_monotonous=True,
+                                                      num_data_points=1000,
+                                                      experiment=experiments)
+                  gig_aic_individual_results.append(gig_result_aic)
+                  rnd_aic_individual_results.append(rnd_result_aic)
+                  vanilla_aic_individual_results.append(vanilla_result_aic)
+                  xrai_aic_individual_results.append(xrai_result_aic)
+                  smoothgrad_aic_individual_results.append(smoothgrad_result_aic)
+                  gradcam_aic_individual_results.append(gradcam_result_aic)
+                  gradcamplusplus_aic_individual_results.append(gradcamplusplus_result_aic)
+                  scorecam_aic_individual_results.append(scorecam_result_aic)
+
+
 
                 print(len(gig_aic_individual_results), len(rnd_aic_individual_results))
-        if len(gig_aic_individual_results) >= 1300:
+        #1300
+        if len(gig_aic_individual_results) >= n_samples:
             break
     return gig_aic_individual_results, rnd_aic_individual_results, gig_sic_individual_results, rnd_sic_individual_results, \
         vanilla_aic_individual_results, smoothgrad_aic_individual_results, vanilla_sic_individual_results, \
@@ -510,7 +534,8 @@ def compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experimen
 @click.command()
 @click.option("--ds",default="BrainTumor", help="The dataset to use for training the model.")
 @click.option("--experiments",default="base", help="The experiment to run.")
-def main(ds, experiments):
+@click.option("--n_samples",default=1000, help="The number of datapoints to run the experiment on.")
+def main(ds, experiments, n_samples):
   if ds == "BrainTumor":
     dl =  DataLoad()
 
@@ -520,7 +545,7 @@ def main(ds, experiments):
     gig_aic_individual_results, rnd_aic_individual_results, gig_sic_individual_results, rnd_sic_individual_results, \
     vanilla_aic_individual_results, smoothgrad_aic_individual_results, vanilla_sic_individual_results, \
     smoothgrad_sic_individual_results, xrai_aic_individual_results, xrai_sic_individual_results, gradcam_aic_individual_results, \
-    gradcam_sic_individual_results, gradcamplusplus_aic_individual_results, gradcamplusplus_sic_individual_results, scorecam_aic_individual_results, scorecam_sic_individual_results = compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experiments = experiments)
+    gradcam_sic_individual_results, gradcamplusplus_aic_individual_results, gradcamplusplus_sic_individual_results, scorecam_aic_individual_results, scorecam_sic_individual_results = compute_pic_score(dl,model_indx, masked = True, ds = "BrainTumor", experiments = experiments, n_samples = n_samples)
     print(len(gig_aic_individual_results), len(rnd_aic_individual_results))
     gig_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gig_aic_individual_results, method='median')
     rnd_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=rnd_aic_individual_results, method='median')
@@ -552,7 +577,7 @@ def main(ds, experiments):
     show_curve(gradcam_agg_result, title=f'{title}', label='GradCAM', color='black', ax=ax)
     show_curve(gradcamplusplus_agg_result, title=f'{title}', label='GradCAM++', color='brown', ax=ax)
     show_curve(scorecam_agg_result, title=f'{title}', label='ScoreCAM', color='pink', ax=ax)
-    plt.savefig(f'./Figures/{ds}_AIC_Aggregated.tiff', format='tiff', dpi=300)
+    plt.savefig(f'./Figures/{ds}_{experiments}_AIC_Aggregated.tiff', format='tiff', dpi=300)
     plt.close(fig)
 
     gig_agg_result = pic.aggregate_individual_pic_results(compute_pic_metrics_results=gig_sic_individual_results, method='median')
